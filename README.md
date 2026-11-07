@@ -14,9 +14,11 @@ A mod for the FH3 Mod Platform (1.1.0 or newer): FH2-Input's feel on Forza Horiz
 
 Close Steam's PlayStation controller support and DS4Windows while playing. When the game ends or another window is in front, the controller goes back to itself. Nothing is written into the game's folder.
 
+**PlayStation button icons** in the game's prompts (✕ ○ □ △, L1 R1 L2 R2) while the DualSense is in use; the game's own Xbox icons when an Xbox pad is. The look follows the device in use at once: the new icons are written over the ones in the game's memory (found by their bytes, a search that runs on a low-priority thread from 25 s after the start, as in alezwork's FH2-Input). `scripts/gen_icons.py` draws them from the game's own icons.
+
 **The device in use decides**: the one that gave the last real input (a DualSense press, an Xbox pad's button, trigger past a quarter or stick past a third) gets the haptics, triggers and lights; switch to an Xbox pad and the DualSense goes quiet, press the DualSense and it takes over again (a switch waits 0.6 s). It starts with whichever you touch first.
 
-Not (yet) on FH3: the game's events (skills, combos, checkpoints, level-ups) and its interface sounds as haptics, PlayStation button icons in the game's prompts, the settings inside Settings > Controls (they are on the MODS page).
+Not (yet) on FH3: the game's events (skills, combos, checkpoints, level-ups) and its interface sounds as haptics, the settings inside Settings > Controls (they are on the MODS page).
 
 Build: `cmake -S mods/dualsense -B build -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake && cmake --build build`.
 

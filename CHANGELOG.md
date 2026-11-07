@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.0
+
+- PlayStation button icons (✕ ○ □ △, L1 R1 L2 R2) that follow the device in use, live.
+
 ## 1.2.0
 
 - The device in use decides: a DualSense and an Xbox pad can both be connected; the one with the last real input gets the haptics, adaptive triggers and lights.

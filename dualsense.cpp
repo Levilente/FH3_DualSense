@@ -38,6 +38,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -1665,6 +1666,270 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     return TRUE;
 }
 
+
+// ---- the game's button icons follow the device in use (PlayStation icons for the DualSense, the game's own for an Xbox pad) ----------
+// The game reads ControllerIcons.zip once. The PlayStation look goes to the game as files (platform set_file) when a DualSense is there
+// at the start; a change of device writes the other look over the icons already in the game's memory (found by their bytes; the
+// engine uploads a texture again when its memory is written). Method after alezwork/FH2-Input.
+#include "icons_data.h"
+struct IconTex {
+    const BYTE* hdr = nullptr;      // 87-byte .swatchbin header
+    const BYTE* d[2] = {};          // pixels: 0 the game's (Xbox), 1 PlayStation
+    DWORD len = 0, anchor[2] = {};
+    ULONGLONG key[2] = {};
+    std::vector<std::string> paths; // inside ControllerIcons.zip
+};
+std::vector<IconTex> g_itex;
+struct IconFound { BYTE* at; int tex, gen; };
+std::vector<IconFound> g_ifound;
+std::vector<void*> g_iallocs;
+SRWLOCK g_imem = SRWLOCK_INIT;
+std::atomic<int> g_look{0};
+BYTE* g_ibloom = nullptr;
+struct KeySlot { ULONGLONG key; int tex, set; };
+KeySlot g_ikeys[512];
+DWORD ikey_hash(ULONGLONG k) { return static_cast<DWORD>((k * 0x9E3779B97F4A7C15ull) >> 44); }
+
+DWORD pick_anchor(const BYTE* d, DWORD len) {
+    DWORD best = 0;
+    int best_score = -1;
+    for (DWORD o = 0; o + 8 <= len; o += 4) {
+        int distinct = 0;
+        for (int i = 0; i < 8; i++) {
+            bool seen = false;
+            for (int j = 0; j < i; j++) seen |= d[o + i] == d[o + j];
+            distinct += !seen;
+        }
+        if (distinct <= best_score) continue;
+        ULONGLONG q;
+        std::memcpy(&q, d + o, 8);
+        bool again = false;
+        for (DWORD k = 0; k + 8 <= len && !again; k += 4) {
+            ULONGLONG w;
+            std::memcpy(&w, d + k, 8);
+            again = k != o && w == q;
+        }
+        if (again) continue;
+        best_score = distinct;
+        best       = o;
+        if (distinct == 8) break;
+    }
+    return best;
+}
+
+void icons_load() {
+    const BYTE* p = kIconBlob;
+    DWORD n;
+    std::memcpy(&n, p, 4);
+    p += 4;
+    for (DWORD i = 0; i < n; i++) {
+        DWORD len, nf;
+        std::memcpy(&len, p, 4);
+        std::memcpy(&nf, p + 4, 4);
+        p += 8;
+        IconTex t;
+        for (DWORD k = 0; k < nf; k++) {
+            t.paths.emplace_back(reinterpret_cast<const char*>(p + 1), p[0]);
+            p += 1 + p[0];
+        }
+        t.hdr = p;
+        p += 87;
+        t.len = len;
+        t.d[0] = p;
+        p += len;
+        t.d[1] = p;
+        p += len;
+        for (int v = 0; v < 2; v++) {
+            t.anchor[v] = pick_anchor(t.d[v], len);
+            std::memcpy(&t.key[v], t.d[v] + t.anchor[v], 8);
+        }
+        g_itex.push_back(std::move(t));
+    }
+    std::memset(g_ikeys, 0, sizeof g_ikeys);
+    for (auto& k : g_ikeys) k.tex = -1;
+    g_ibloom = static_cast<BYTE*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 1 << 17));
+    for (int i = 0; g_ibloom && i < static_cast<int>(g_itex.size()); i++)
+        for (int v = 0; v < 2; v++) {
+            const DWORD h = ikey_hash(g_itex[i].key[v]);
+            g_ibloom[h >> 3] |= static_cast<BYTE>(1 << (h & 7));
+            for (DWORD k = h & 511;; k = (k + 1) & 511)
+                if (g_ikeys[k].tex < 0) { g_ikeys[k] = {g_itex[i].key[v], i, v}; break; }
+        }
+}
+
+bool is_ours(const BYTE* p) { return p >= kIconBlob && p < kIconBlob + sizeof kIconBlob; }
+bool known_alloc(void* b) { return std::find(g_iallocs.begin(), g_iallocs.end(), b) != g_iallocs.end(); }
+
+// which look the memory at p holds of icon t (-1: none)
+int holds(BYTE* p, int t, BYTE* tmp) {
+    SIZE_T got = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), p, tmp, g_itex[t].len, &got) || got != g_itex[t].len) return -1;
+    const int cur = g_look.load();
+    if (!std::memcmp(tmp, g_itex[t].d[cur], g_itex[t].len)) return cur;
+    if (!std::memcmp(tmp, g_itex[t].d[1 - cur], g_itex[t].len)) return 1 - cur;
+    return -1;
+}
+
+void found_add(BYTE* at, int tex, int gen) {
+    AcquireSRWLockExclusive(&g_imem);
+    bool have = false;
+    for (auto& f : g_ifound)
+        if (f.at == at) { f.tex = tex; f.gen = gen; have = true; break; }
+    if (!have) g_ifound.push_back({at, tex, gen});
+    ReleaseSRWLockExclusive(&g_imem);
+}
+
+void mem_scan(bool known) {
+    static BYTE chunk[(1 << 20) + 8];
+    BYTE* tmp = static_cast<BYTE*>(HeapAlloc(GetProcessHeap(), 0, 1 << 15));
+    static int gen_counter = 0;
+    const int gen = ++gen_counter;
+    if (!tmp || !g_ibloom) return;
+    MEMORY_BASIC_INFORMATION mbi;
+    for (BYTE* a = reinterpret_cast<BYTE*>(0x10000); VirtualQuery(a, &mbi, sizeof mbi) == sizeof mbi; a = static_cast<BYTE*>(mbi.BaseAddress) + mbi.RegionSize) {
+        const DWORD prot = mbi.Protect & 0xFF;
+        if (mbi.State != MEM_COMMIT || (mbi.Type != MEM_PRIVATE && mbi.Type != MEM_MAPPED) || (mbi.Protect & PAGE_GUARD) ||
+            (prot != PAGE_READWRITE && prot != PAGE_WRITECOPY && prot != PAGE_EXECUTE_READWRITE && prot != PAGE_READONLY))
+            continue;
+        if (static_cast<BYTE*>(mbi.BaseAddress) + mbi.RegionSize <= a) break;
+        if (known && !known_alloc(mbi.AllocationBase)) continue;
+        BYTE* r = static_cast<BYTE*>(mbi.BaseAddress);
+        BYTE* end = r + mbi.RegionSize;
+        for (BYTE* c = r; c < end; c += 1 << 20) {
+            const SIZE_T want = static_cast<SIZE_T>(end - c) < (1 << 20) + 8 ? static_cast<SIZE_T>(end - c) : (1 << 20) + 8;
+            SIZE_T got = 0;
+            if (!ReadProcessMemory(GetCurrentProcess(), c, chunk, want, &got) || got < 8) continue;
+            for (SIZE_T o = 0; o + 8 <= got && o < (1 << 20); o += 4) {
+                ULONGLONG q;
+                std::memcpy(&q, chunk + o, 8);
+                const DWORD h = ikey_hash(q);
+                if (!(g_ibloom[h >> 3] & (1 << (h & 7)))) continue;
+                for (DWORD k = h & 511; g_ikeys[k].tex >= 0; k = (k + 1) & 511) {
+                    if (g_ikeys[k].key != q) continue;
+                    const int t = g_ikeys[k].tex, v = g_ikeys[k].set;
+                    const DWORD an = g_itex[t].anchor[v];
+                    if (o < an) continue;
+                    BYTE* base = c + o - an;
+                    if (!is_ours(base) && holds(base, t, tmp) == v) found_add(base, t, gen);
+                }
+            }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, tmp);
+    AcquireSRWLockExclusive(&g_imem);
+    if (!known) {
+        std::vector<IconFound> keep;
+        for (auto& f : g_ifound)
+            if (f.gen == gen) keep.push_back(f);
+        g_ifound.swap(keep);
+        g_iallocs.clear();
+        for (auto& f : g_ifound) {
+            MEMORY_BASIC_INFORMATION m;
+            if (VirtualQuery(f.at, &m, sizeof m) && !known_alloc(m.AllocationBase) && g_iallocs.size() < 256) g_iallocs.push_back(m.AllocationBase);
+        }
+        say("icons: %d copies of the button icons found in the game's memory", static_cast<int>(g_ifound.size()));
+    }
+    ReleaseSRWLockExclusive(&g_imem);
+}
+
+// Texture memory the engine has sealed read-only faults on a write; the engine's handler unseals it (and uploads the texture again),
+// the write goes on. Memory without that write watch isn't the engine's.
+volatile DWORD g_iwriter;
+BYTE* volatile g_iwlo;
+BYTE* volatile g_iwhi;
+PVOID g_iveh;
+LONG CALLBACK icons_veh(EXCEPTION_POINTERS* x) {
+    EXCEPTION_RECORD* r = x->ExceptionRecord;
+    DWORD old;
+    if (r->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || r->NumberParameters < 2 || r->ExceptionInformation[1] == 0 || r->ExceptionInformation[0] != 1 ||
+        GetCurrentThreadId() != g_iwriter)
+        return EXCEPTION_CONTINUE_SEARCH;
+    BYTE* a = reinterpret_cast<BYTE*>(r->ExceptionInformation[1]);
+    if (a < g_iwlo || a >= g_iwhi || !VirtualProtect(reinterpret_cast<void*>(reinterpret_cast<ULONG_PTR>(a) & ~static_cast<ULONG_PTR>(0xFFF)), 1, PAGE_READWRITE, &old))
+        return EXCEPTION_CONTINUE_SEARCH;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+bool write_watched(BYTE* p) {
+    PVOID pages[1];
+    ULONG_PTR count = 1;
+    ULONG gran;
+    return GetWriteWatch(0, reinterpret_cast<void*>(reinterpret_cast<ULONG_PTR>(p) & ~static_cast<ULONG_PTR>(0xFFF)), 4096, pages, &count, &gran) == 0;
+}
+bool mem_put(BYTE* at, const BYTE* src, DWORD len) {
+    MEMORY_BASIC_INFORMATION m;
+    if (!VirtualQuery(at, &m, sizeof m) || m.State != MEM_COMMIT) return false;
+    const DWORD prot = m.Protect & 0xFF;
+    const bool sealed = prot == PAGE_READONLY;
+    if (sealed && !write_watched(at)) return false;
+    if (!sealed && prot != PAGE_READWRITE && prot != PAGE_EXECUTE_READWRITE) return false;
+    if (!g_iveh) g_iveh = AddVectoredExceptionHandler(0, icons_veh);
+    g_iwlo    = at;
+    g_iwhi    = at + len;
+    g_iwriter = GetCurrentThreadId();
+    std::memcpy(at, src, len);
+    g_iwriter = 0;
+    return true;
+}
+void mem_apply() {
+    static BYTE* tmp = static_cast<BYTE*>(HeapAlloc(GetProcessHeap(), 0, 1 << 15));
+    if (!tmp || g_itex.empty()) return;
+    const int want = g_look.load();
+    int changed = 0;
+    AcquireSRWLockExclusive(&g_imem);
+    for (auto& f : g_ifound) {
+        const int h = holds(f.at, f.tex, tmp);
+        if (h >= 0 && h != want && mem_put(f.at, g_itex[f.tex].d[want], g_itex[f.tex].len)) ++changed;
+    }
+    ReleaseSRWLockExclusive(&g_imem);
+    if (changed) say("icons: %s look (%d icons in the game's memory changed)", want ? "PlayStation" : "Xbox", changed);
+}
+
+DWORD WINAPI icons_scan_thread(LPVOID) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+    Sleep(25000);
+    for (;;) {
+        mem_scan(false);
+        mem_apply();
+        for (int k = 0; k < 10; k++) {
+            for (int i = 0; i < 300; i++) {   // 30 s, but a full search at once when a look changed and none was found yet
+                Sleep(100);
+                if (g_ifound.empty() && i == 100) break;
+            }
+            mem_scan(true);
+            mem_apply();
+            if (g_ifound.empty()) break;
+        }
+    }
+}
+
+// the look follows the device in use; the PlayStation files go to the game if a DualSense is there at the start
+DWORD WINAPI icons_thread(LPVOID) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    icons_load();
+    for (int i = 0; i < 80 && !g_ds.h; i++) Sleep(100);   // the controller thread opens the DualSense in the first seconds
+    if (g_ds.h && ds_active() && g_api->api_version >= 2 && g_api->set_file) {
+        int ok = 0;
+        static const char base[] = "ui/textures/data_bound/ControllerIcons/";
+        for (auto& t : g_itex) {
+            std::vector<BYTE> file(t.hdr, t.hdr + 87);
+            file.insert(file.end(), t.d[1], t.d[1] + t.len);
+            for (auto& p : t.paths)
+                if (g_api->set_file(g_mod, (base + p).c_str(), file.data(), file.size())) ++ok;
+        }
+        g_look = 1;
+        say("icons: the PlayStation look handed to the game (%d files)", ok);
+    }
+    if (HANDLE t = CreateThread(nullptr, 0, icons_scan_thread, nullptr, 0, nullptr)) CloseHandle(t);
+    for (;;) {
+        Sleep(100);
+        const int want = g_ds.h && ds_active() ? 1 : 0;
+        if (want != g_look.load()) {
+            g_look = want;
+            mem_apply();
+        }
+    }
+}
+
 FH3MOD_EXPORT int fh3mod_init(const FH3ModApi* api) {
     if (api->api_version < 11) return 1;
     g_api = api;
@@ -1685,5 +1950,6 @@ FH3MOD_EXPORT int fh3mod_init(const FH3ModApi* api) {
     add_rows(api);
     if (HANDLE t = CreateThread(nullptr, 0, install_hooks, nullptr, 0, nullptr)) CloseHandle(t);
     if (HANDLE t = CreateThread(nullptr, 0, controller_thread, nullptr, 0, nullptr)) CloseHandle(t);
+    if (HANDLE t = CreateThread(nullptr, 0, icons_thread, nullptr, 0, nullptr)) CloseHandle(t);
     return 0;
 }
