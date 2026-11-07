@@ -18,7 +18,9 @@ Close Steam's PlayStation controller support and DS4Windows while playing. When 
 
 **The device in use decides**: the one that gave the last real input (a DualSense press, an Xbox pad's button, trigger past a quarter or stick past a third) gets the haptics, triggers and lights; switch to an Xbox pad and the DualSense goes quiet, press the DualSense and it takes over again (a switch waits 0.6 s). It starts with whichever you touch first.
 
-Not (yet) on FH3: the game's events (skills, combos, checkpoints, level-ups) and its interface sounds as haptics, the settings inside Settings > Controls (they are on the MODS page).
+**The game's own interface sounds are felt** (hooked in the audio engine, as in FH2-Input): a tick for every move in the menus, a click for every choice, swells as pages open, tab switches on the bumper's side, and the events: skills and their chain, checkpoints, countdowns, speed traps, race results, level-ups, the tombola, notifications. *Menu haptics* and *Events* sliders on the MODS page set their strength.
+
+Not (yet) on FH3: the settings inside Settings > Controls (they are on the MODS page).
 
 Build: `cmake -S mods/dualsense -B build -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake && cmake --build build`.
 

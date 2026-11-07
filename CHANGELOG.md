@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.0
+
+- The game's interface sounds drive haptics: menu moves, choices, page swells, tab switches, and events (skills, checkpoints, countdowns, speed traps, results, level-ups, tombola, notifications).
+
 ## 1.3.0
 
 - PlayStation button icons (✕ ○ □ △, L1 R1 L2 R2) that follow the device in use, live.

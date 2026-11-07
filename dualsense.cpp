@@ -40,6 +40,9 @@
 #include <string>
 #include <vector>
 
+extern std::atomic<bool> g_ui_hooked;   // defined at the end: the game's interface sounds are hooked
+bool install_ui_sound_hooks();
+
 namespace {
 
 // ---- the game ---------------------------------------------------------------------------------------------------------------------
@@ -291,7 +294,7 @@ float fx_edge(float t, float len, float ramp) {
     if (len - t < ramp) e = std::min(e, (len - t) / ramp);
     return e < 0 ? 0 : e;
 }
-void fx_add(int kind, float amp, float hz, float hz1, float len, float decay, float pan = 0) {
+void fx_add(int kind, float amp, float hz, float hz1, float len, float decay, float pan = 0, double delay = 0) {
     if (amp <= 0.003f) return;
     std::scoped_lock lk{g_fx_mu};
     int slot = 0;
@@ -302,7 +305,7 @@ void fx_add(int kind, float amp, float hz, float hz1, float len, float decay, fl
     }
     static uint32_t seed = 0x9E3779B9u;
     seed = seed * 1664525u + 1013904223u;
-    g_fx[slot] = FxVoice{kind, now_s(), len > 0 ? len : decay * 8, amp, hz, hz1, decay, pan, seed, true};
+    g_fx[slot] = FxVoice{kind, now_s() + delay, len > 0 ? len : decay * 8, amp, hz, hz1, decay, pan, seed, true};
 }
 float fx_wave(const FxVoice& v, float t) {
     switch (v.kind) {
@@ -674,6 +677,7 @@ DWORD WINAPI install_hooks(LPVOID) {
     const bool b = h2 && g_api->enable_hooks(g_mod, h2);
     say("car: the game's feedback %s (rumble %s, slips %s); Car update %s, HUD controller %s", ok_r && ok_h ? "hooked" : "NOT all hooked",
         ok_r ? "on" : "FAILED", ok_h ? "on" : "FAILED", a ? "on" : "FAILED", b ? "on" : "FAILED");
+    install_ui_sound_hooks();
     return 0;
 }
 
@@ -1324,7 +1328,7 @@ struct InState {
 constexpr WORD B_UP = 1, B_DOWN = 2, B_LEFT = 4, B_RIGHT = 8, B_A = 0x10, B_B = 0x20, B_LB = 0x40, B_RB = 0x80;
 
 void menu_haptics(WORD btn, float sx, float sy, double now) {
-    if (S.menus <= 0 || car_driving(now) || !game_in_front()) return;
+    if (S.menus <= 0 || car_driving(now) || !game_in_front() || g_ui_hooked.load()) return;
     const WORD pressed = static_cast<WORD>(btn & ~IS.buttons);
     const float m = S.menus;
     if (pressed & (B_UP | B_DOWN | B_LEFT | B_RIGHT)) { fx_add(FX_TICK, 1.6f * m, 170, 0, 0.03f, 0.012f); fx_add(FX_THUMP, 0.9f * m, 80, 0, 0, 0.03f); }
@@ -1666,6 +1670,339 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     return TRUE;
 }
 
+
+// ---- the game's own interface sounds, felt (FH2-Input's sounds.h) ------------------------------------------------------------------
+// Every interface sound is started by the audio engine with a trigger name (a std::string): the menus' moves and choices, skills,
+// checkpoints, countdowns, level-ups. Start, play and stop are hooked; ours reads the name, plays its feel on the haptics and goes on.
+enum {
+    P_NONE, P_MOVE, P_SCROLL, P_SLIDER, P_SELECT, P_BACK, P_TAB, P_OPEN, P_CLOSE, P_PAUSE, P_FAIL, P_MESSAGE,
+    P_SKILL, P_STREAK, P_BIGSKILL, P_MULTIPLIER, P_BANK, P_LOSE, P_SKILLPOINT, P_XP, P_CHECKPOINT, P_MISSED,
+    P_COUNT_HIGH, P_COUNT_LOW, P_COUNT_GO, P_NOTIFY, P_NOTIFY_BIG, P_SPEEDTRAP, P_CELEBRATE, P_CELEBRATE_BIG,
+    P_RATCHET, P_THUD, P_RING, P_TOMBOLA, P_STAMP, P_SHUTTER
+};
+enum { G_NONE, G_MENU, G_EVENT };
+
+/* what in the trigger's name -> menus or events, the feel */
+const struct {
+    const char *has;
+    BYTE group, preset;
+} kUi[] = {
+    /* the tombola (a prize at each level-up) */
+    {"Tombola_Spin", G_EVENT, P_TOMBOLA},
+    {"Tombola_Win_Gold", G_EVENT, P_CELEBRATE_BIG},
+    {"Tombola_Winner", G_EVENT, P_CELEBRATE_BIG},
+    {"Tombola_Win_Silver", G_EVENT, P_CELEBRATE},
+    {"Tombola_Win", G_EVENT, P_THUD},
+    {"Tombola_Lose", G_EVENT, P_LOSE},
+    {"Tombola_Open", G_MENU, P_OPEN},
+    {"Tombola_Close", G_MENU, P_CLOSE},
+    {"Tombola_SeeRep", G_MENU, P_SELECT},
+    /* skills: near misses, drifts, air, ... and their chain */
+    {"SkillNameCleanStreak", G_EVENT, P_STREAK},
+    {"SkillNameHighValue", G_EVENT, P_BIGSKILL},
+    {"SkillNameAppear", G_EVENT, P_SKILL},
+    {"DrivingSkills_Multiplier", G_EVENT, P_MULTIPLIER},
+    {"DrivingSkills_Combo", G_EVENT, P_MULTIPLIER},
+    {"PointsBank", G_EVENT, P_BANK},
+    {"PointsLose", G_EVENT, P_LOSE},
+    {"SkillPointEarned", G_EVENT, P_SKILLPOINT},
+    {"XPEarned", G_EVENT, P_XP},
+    {"PointsCount", G_NONE, P_NONE}, /* the chain's points counting up while driving: the road is felt instead */
+    /* races, speed traps and zones, rivals */
+    {"CheckpointPassed", G_EVENT, P_CHECKPOINT},
+    {"Checkpoint_Missed", G_EVENT, P_MISSED},
+    {"Countdown_High", G_EVENT, P_COUNT_HIGH},
+    {"Countdown_Low", G_EVENT, P_COUNT_LOW},
+    {"TimerCountdown", G_EVENT, P_COUNT_LOW},
+    {"Countdown_End", G_EVENT, P_COUNT_GO},
+    {"SpeedTrap", G_EVENT, P_SPEEDTRAP},
+    {"SpeedStatsOvertakeShine", G_NONE, P_NONE},
+    {"SpeedStatsOvertake", G_EVENT, P_NOTIFY_BIG},
+    {"SpeedStatsMajorOn", G_EVENT, P_NOTIFY_BIG},
+    {"SpeedStatsMinorOn", G_EVENT, P_NOTIFY},
+    {"ScoreFlash", G_EVENT, P_NOTIFY},
+    {"Race_SignUp", G_EVENT, P_SELECT},
+    {"RaceComplete", G_EVENT, P_THUD},
+    /* after a race: the results, the counters, a level-up */
+    {"PositionResultOn", G_EVENT, P_THUD},
+    {"TotalScreenFlash", G_EVENT, P_THUD},
+    {"LevelUpBarFull", G_EVENT, P_CELEBRATE},
+    {"XPBarLevelUp", G_EVENT, P_CELEBRATE_BIG},
+    {"LevelUpNumberDrop", G_EVENT, P_THUD},
+    {"Count_lp", G_EVENT, P_RATCHET},
+    {"BarFill_lp", G_EVENT, P_RATCHET},
+    {"TotalOn", G_EVENT, P_NOTIFY_BIG},
+    {"ItemOn", G_EVENT, P_NOTIFY},
+    {"TitleOn", G_EVENT, P_NOTIFY},
+    {"InitialFlash", G_EVENT, P_THUD},
+    {"RewardFlash", G_EVENT, P_THUD},
+    {"EventUnlock", G_EVENT, P_CELEBRATE},
+    {"LocationUnlock", G_EVENT, P_CELEBRATE},
+    {"RewardBoardDiscovered", G_EVENT, P_CELEBRATE},
+    {"Perks_Activate", G_EVENT, P_CELEBRATE},
+    {"GainedPlayer", G_EVENT, P_BIGSKILL},
+    {"GivenPlayer", G_EVENT, P_BIGSKILL},
+    {"KingLostPlayer", G_EVENT, P_LOSE},
+    {"Phone_Ring", G_EVENT, P_RING},
+    {"Notification_GenericOn", G_EVENT, P_NOTIFY},
+    {"Notification_BoardOn", G_EVENT, P_NOTIFY},
+    {"Notification_BoardUpdate", G_EVENT, P_NOTIFY},
+    /* photos, the paint shop */
+    {"Promo_TakePhoto", G_MENU, P_SHUTTER},
+    {"Promo_Zoom", G_MENU, P_SLIDER},
+    {"PaintItemStamp", G_MENU, P_STAMP},
+    {"PaintItemSlide", G_MENU, P_SCROLL},
+    /* the menus */
+    {"PauseMenu_Open", G_MENU, P_PAUSE},
+    {"ChangeTab", G_MENU, P_TAB},
+    {"SubMenuOpen", G_MENU, P_OPEN},
+    {"PopUpOpen", G_MENU, P_OPEN},
+    {"LeaderboardOpen", G_MENU, P_OPEN},
+    {"InfoScreenOpen", G_MENU, P_OPEN},
+    {"_Open_", G_MENU, P_OPEN},
+    {"SubMenuClose", G_MENU, P_CLOSE},
+    {"PopUpClose", G_MENU, P_CLOSE},
+    {"PopUpMenu_Close", G_MENU, P_CLOSE},
+    {"PopUpInfo_Close", G_MENU, P_CLOSE},
+    {"LeaderboardClose", G_MENU, P_CLOSE},
+    {"InfoScreenClose", G_MENU, P_CLOSE},
+    {"_Close_", G_MENU, P_BACK},
+    {"_Back_", G_MENU, P_BACK},
+    {"_Fail_", G_MENU, P_FAIL},
+    {"MessageRead", G_MENU, P_MESSAGE},
+    {"Vote_Result", G_MENU, P_MESSAGE},
+    {"Slider", G_MENU, P_SLIDER},
+    {"CarScroll", G_MENU, P_SCROLL},
+    {"_Scroll_", G_MENU, P_SCROLL},
+    {"_Move_", G_MENU, P_MOVE},
+    {"_Select_", G_MENU, P_SELECT},
+    {"Nav_Accept", G_MENU, P_SELECT},
+    {"Nav_Setup", G_MENU, P_SELECT},
+    {"SetRoute", G_MENU, P_SELECT},
+    {"ANNA_Wake", G_MENU, P_OPEN},
+    {"ANNA_Sleep", G_MENU, P_CLOSE},
+    {"Map_ClearRoute", G_MENU, P_CLOSE},
+    {"MajorCount", G_EVENT, P_NOTIFY_BIG},
+    {"MinorStar", G_EVENT, P_NOTIFY},
+    {"FansCount", G_EVENT, P_NOTIFY},
+    {"PostRace_", G_EVENT, P_NOTIFY},
+    {"Perks_Rejected", G_MENU, P_FAIL},
+    {"FlagRushScoredPlayer", G_EVENT, P_BIGSKILL},
+    {"FlagRushGainedOther", G_EVENT, P_NOTIFY},
+    {"FlagRushLostPlayer", G_EVENT, P_LOSE},
+    {"InfectionGainedOther", G_EVENT, P_NOTIFY},
+    {"KingGainedOther", G_EVENT, P_NOTIFY},
+    {"Promo_Start", G_MENU, P_OPEN},
+    {"InfoScreenTotalAppear", G_MENU, P_OPEN},
+    {"ZoomInLoop", G_MENU, P_SLIDER},
+    {"ZoomOutLoop", G_MENU, P_SLIDER},
+    {"ChangeTab", G_MENU, P_TAB},
+};
+
+
+void fxd(int kind, float delay, float amp, float hz, float hz1, float len, float decay, float pan, uint32_t) {
+    fx_add(kind, amp, hz, hz1, len, decay, pan, delay);
+}
+void ui_feel(int p, float k, float pan, UINT32 id)
+{
+    switch (p) {
+    case P_MOVE: /* the lightest, crisp */
+        fxd(FX_TICK, 0, 0.6f * k, 235, 0, 0, 0.0035f, pan, 0);
+        break;
+    case P_SCROLL:
+        fxd(FX_TICK, 0, 0.48f * k, 255, 0, 0, 0.003f, pan, 0);
+        break;
+    case P_SLIDER:
+        fxd(FX_TICK, 0, 0.36f * k, 285, 0, 0, 0.0025f, pan, 0);
+        break;
+    case P_SELECT: /* a click with some body */
+        fxd(FX_TICK, 0, 0.8f * k, 170, 0, 0, 0.006f, 0, 0);
+        fxd(FX_THUMP, 0, 0.4f * k, 75, 0, 0, 0.014f, 0, 0);
+        break;
+    case P_BACK: /* softer, lower */
+        fxd(FX_TICK, 0, 0.6f * k, 120, 0, 0, 0.007f, 0, 0);
+        break;
+    case P_TAB: /* two ticks on the side of the bumper */
+        fxd(FX_TICK, 0, 0.6f * k, 210, 0, 0, 0.004f, pan, 0);
+        fxd(FX_TICK, 0.045f, 0.45f * k, 250, 0, 0, 0.0035f, pan, 0);
+        break;
+    case P_OPEN: /* a swell up */
+        fxd(FX_SWEEP, 0, 0.24f * k, 70, 170, 0.09f, 0, 0, 0);
+        break;
+    case P_CLOSE:
+        fxd(FX_SWEEP, 0, 0.2f * k, 160, 70, 0.08f, 0, 0, 0);
+        break;
+    case P_PAUSE:
+        fxd(FX_SWEEP, 0, 0.3f * k, 60, 150, 0.12f, 0, 0, 0);
+        fxd(FX_TICK, 0.11f, 0.4f * k, 200, 0, 0, 0.004f, 0, 0);
+        break;
+    case P_FAIL: /* no: two low buzzes */
+        fxd(FX_BUZZ, 0, 0.45f * k, 55, 0, 0.06f, 0, 0, 0);
+        fxd(FX_BUZZ, 0.1f, 0.45f * k, 55, 0, 0.06f, 0, 0, 0);
+        break;
+    case P_MESSAGE:
+    case P_XP:
+        fxd(FX_TICK, 0, 0.42f * k, 205, 0, 0, 0.004f, 0, 0);
+        break;
+    case P_SKILL: /* ding-ding */
+        fxd(FX_TICK, 0, 0.5f * k, 190, 0, 0, 0.006f, 0, 0);
+        fxd(FX_TICK, 0.06f, 0.38f * k, 240, 0, 0, 0.005f, 0, 0);
+        break;
+    case P_STREAK: /* three, rising */
+        for (int i = 0; i < 3; i++)
+            fxd(FX_TICK, 0.05f * i, 0.45f * k, 170.0f + 40 * i, 0, 0, 0.005f, 0, 0);
+        break;
+    case P_BIGSKILL:
+        fxd(FX_THUMP, 0, 0.55f * k, 70, 0, 0, 0.04f, 0, 0);
+        fxd(FX_TICK, 0.04f, 0.5f * k, 220, 0, 0, 0.005f, 0, 0);
+        break;
+    case P_MULTIPLIER: /* a rise and a tick on top */
+        fxd(FX_SWEEP, 0, 0.35f * k, 110, 240, 0.12f, 0, 0, 0);
+        fxd(FX_TICK, 0.12f, 0.45f * k, 260, 0, 0, 0.004f, 0, 0);
+        break;
+    case P_BANK: /* the chain banked: a thud, then two bright ticks */
+        fxd(FX_THUMP, 0, 0.7f * k, 50, 0, 0, 0.07f, 0, 0);
+        fxd(FX_TICK, 0.09f, 0.5f * k, 220, 0, 0, 0.005f, 0, 0);
+        fxd(FX_TICK, 0.15f, 0.4f * k, 260, 0, 0, 0.004f, 0, 0);
+        break;
+    case P_LOSE: /* deflating */
+        fxd(FX_SWEEP, 0, 0.5f * k, 150, 45, 0.22f, 0, 0, 0);
+        fxd(FX_THUMP, 0.2f, 0.4f * k, 40, 0, 0, 0.06f, 0, 0);
+        break;
+    case P_SKILLPOINT:
+        for (int i = 0; i < 4; i++)
+            fxd(FX_TICK, 0.06f * i, 0.45f * k, 160.0f + 40 * i, 0, 0, 0.005f, 0, 0);
+        fxd(FX_THUMP, 0.26f, 0.6f * k, 60, 0, 0, 0.08f, 0, 0);
+        break;
+    case P_CHECKPOINT:
+        fxd(FX_TICK, 0, 0.45f * k, 200, 0, 0, 0.005f, 0, 0);
+        fxd(FX_TICK, 0.04f, 0.35f * k, 240, 0, 0, 0.004f, 0, 0);
+        break;
+    case P_MISSED:
+        fxd(FX_BUZZ, 0, 0.45f * k, 50, 0, 0.12f, 0, 0, 0);
+        break;
+    case P_COUNT_HIGH:
+        fxd(FX_TICK, 0, 0.55f * k, 180, 0, 0, 0.008f, 0, 0);
+        fxd(FX_THUMP, 0, 0.25f * k, 70, 0, 0, 0.02f, 0, 0);
+        break;
+    case P_COUNT_LOW:
+        fxd(FX_TICK, 0, 0.4f * k, 220, 0, 0, 0.005f, 0, 0);
+        break;
+    case P_COUNT_GO:
+        fxd(FX_THUMP, 0, 0.8f * k, 55, 0, 0, 0.1f, 0, 0);
+        fxd(FX_TICK, 0, 0.6f * k, 160, 0, 0, 0.008f, 0, 0);
+        break;
+    case P_NOTIFY:
+        fxd(FX_TICK, 0, 0.36f * k, 220, 0, 0, 0.004f, 0, 0);
+        break;
+    case P_NOTIFY_BIG:
+        fxd(FX_TICK, 0, 0.45f * k, 190, 0, 0, 0.005f, 0, 0);
+        fxd(FX_THUMP, 0, 0.25f * k, 70, 0, 0, 0.025f, 0, 0);
+        break;
+    case P_SPEEDTRAP:
+        fxd(FX_THUMP, 0, 0.6f * k, 65, 0, 0, 0.06f, 0, 0);
+        fxd(FX_TICK, 0, 0.55f * k, 230, 0, 0, 0.005f, 0, 0);
+        fxd(FX_TICK, 0.04f, 0.4f * k, 260, 0, 0, 0.004f, 0, 0);
+        break;
+    case P_CELEBRATE_BIG:
+        fxd(FX_THUMP, 0.55f, 0.8f * k, 50, 0, 0, 0.12f, 0, 0);
+        fxd(FX_TICK, 0.62f, 0.5f * k, 280, 0, 0, 0.004f, 0, 0);
+        /* fall through: the same rise first */
+    case P_CELEBRATE:
+        fxd(FX_SWEEP, 0, 0.35f * k, 80, 240, 0.25f, 0, 0, 0);
+        fxd(FX_THUMP, 0.25f, 0.6f * k, 55, 0, 0, 0.08f, 0, 0);
+        for (int i = 0; i < 3; i++)
+            fxd(FX_TICK, 0.33f + 0.06f * i, 0.35f * k, 250, 0, 0, 0.004f, 0, 0);
+        break;
+    case P_RATCHET:
+        for (int i = 0; i < 9; i++) fxd(FX_TICK, 0.05f * i, 0.26f * k, 230, 0, 0, 0.003f, 0, 0);
+        break;
+    case P_THUD:
+        fxd(FX_THUMP, 0, 0.6f * k, 55, 0, 0, 0.07f, 0, 0);
+        fxd(FX_TICK, 0, 0.35f * k, 160, 0, 0, 0.006f, 0, 0);
+        break;
+    case P_RING: /* a phone buzzing twice */
+        fxd(FX_BUZZ, 0, 0.45f * k, 170, 22, 0.35f, 0, 0, 0);
+        fxd(FX_BUZZ, 0.55f, 0.45f * k, 170, 22, 0.35f, 0, 0, 0);
+        break;
+    case P_TOMBOLA: {   // a drum ticking by, slowing down
+        float tt = 0, gap = 0.04f;
+        for (int i = 0; i < 40 && tt < 3.0f; i++) { fxd(FX_TICK, tt, 0.5f * k, 230, 0, 0, 0.0035f, 0, 0); tt += gap; gap *= 1.07f; }
+        break;
+    }
+    case P_STAMP:
+        fxd(FX_THUMP, 0, 0.65f * k, 60, 0, 0, 0.05f, 0, 0);
+        fxd(FX_TICK, 0, 0.5f * k, 140, 0, 0, 0.006f, 0, 0);
+        break;
+    case P_SHUTTER:
+        fxd(FX_TICK, 0, 0.5f * k, 260, 0, 0, 0.003f, 0, 0);
+        fxd(FX_TICK, 0.03f, 0.4f * k, 180, 0, 0, 0.004f, 0, 0);
+        break;
+    }
+}
+
+
+const char* std_str(const BYTE* s) {
+    if (!s) return nullptr;
+    const SIZE_T n = *reinterpret_cast<const SIZE_T*>(s + 0x10), cap = *reinterpret_cast<const SIZE_T*>(s + 0x18);
+    if (n < 4 || n > 400 || cap < n || cap > 0x100000) return nullptr;
+    const char* p = cap >= 16 ? *reinterpret_cast<const char* const*>(s) : reinterpret_cast<const char*>(s);
+    return p && p[n] == 0 ? p : nullptr;
+}
+void ui_sound(const char* name, bool stop) {
+    static volatile uint32_t last_hash;
+    static volatile double last_at;
+    if (!name || stop) return;
+    uint32_t h = 5381;
+    for (const char* c = name; *c; ++c) h = h * 33 + static_cast<BYTE>(*c);
+    int group = G_NONE, preset = P_NONE;
+    for (const auto& e : kUi)
+        if (std::strstr(name, e.has)) { group = e.group; preset = e.preset; break; }
+    const double now = now_s();
+    if (preset == P_NONE || !g_ds.h || !ds_active() || !game_in_front()) return;
+    if (h == last_hash && now - last_at < 0.03) return;   // one sound twice at once (the code and a storyboard): felt once
+    last_hash = h;
+    last_at   = now;
+    const float k = (group == G_MENU ? S.menus : S.events) * 1.8f;
+    if (k <= 0) return;
+    float pan = 0;
+    if (preset == P_MOVE || preset == P_SCROLL || preset == P_SLIDER) pan = (IS.buttons & B_LEFT) ? -0.55f : (IS.buttons & B_RIGHT) ? 0.55f : 0;
+    else if (preset == P_TAB) pan = (IS.buttons & B_LB) ? -0.7f : (IS.buttons & B_RB) ? 0.7f : 0;
+    ui_feel(preset, k, pan, h);
+}
+using UiStartFn = unsigned char(__fastcall*)(void*, const BYTE*, void*, void*, void*, void*, void*, void*);
+using UiPlayFn  = unsigned char(__fastcall*)(void*, const BYTE*);
+using UiStopFn  = void(__fastcall*)(void*, const BYTE*);
+UiStartFn g_ui_start = nullptr;
+UiPlayFn g_ui_play   = nullptr;
+UiStopFn g_ui_stop   = nullptr;
+unsigned char __fastcall hk_ui_start(void* self, const BYTE* name, void* a, void* b, void* c, void* d, void* e, void* f) {
+    __try { ui_sound(std_str(name), false); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return g_ui_start(self, name, a, b, c, d, e, f);
+}
+unsigned char __fastcall hk_ui_play(void* self, const BYTE* name) {
+    __try { ui_sound(std_str(name), false); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return g_ui_play(self, name);
+}
+void __fastcall hk_ui_stop(void* engine, const BYTE* name) { g_ui_stop(engine, name); }
+
+constexpr DWORD kRvaUiPlay = 0x1981850, kRvaUiStart = 0x1981910, kRvaUiStop = 0x199ECE0;
+bool install_ui_sound_hooks() {
+    static const BYTE kPlay[]  = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x50, 0x48, 0xC7};
+    static const BYTE kStart[] = {0x4C, 0x8B, 0xDC, 0x57, 0x48, 0x83, 0xEC, 0x70};
+    static const BYTE kStop[]  = {0x41, 0x56, 0x48, 0x83, 0xEC, 0x50, 0x48, 0xC7};
+    if (!g_game || std::memcmp(g_game + kRvaUiPlay, kPlay, 8) || std::memcmp(g_game + kRvaUiStart, kStart, 8) || std::memcmp(g_game + kRvaUiStop, kStop, 8)) {
+        say("sounds: the game's interface sounds aren't where they were expected -- no sound-driven haptics");
+        return false;
+    }
+    FH3Hook* a = g_api->hook_function(g_mod, "interface sounds: start", g_game + kRvaUiStart, reinterpret_cast<void*>(&hk_ui_start), reinterpret_cast<void**>(&g_ui_start));
+    FH3Hook* b = g_api->hook_function(g_mod, "interface sounds: play", g_game + kRvaUiPlay, reinterpret_cast<void*>(&hk_ui_play), reinterpret_cast<void**>(&g_ui_play));
+    if (!a || !b) { say("sounds: the interface sounds could not be hooked"); return false; }
+    g_ui_hooked = g_api->enable_hooks(g_mod, a) && g_api->enable_hooks(g_mod, b);
+    return g_ui_hooked;
+}
+
+std::atomic<bool> g_ui_hooked{false};
 
 // ---- the game's button icons follow the device in use (PlayStation icons for the DualSense, the game's own for an Xbox pad) ----------
 // The game reads ControllerIcons.zip once. The PlayStation look goes to the game as files (platform set_file) when a DualSense is there
