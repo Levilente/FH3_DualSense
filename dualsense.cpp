@@ -1654,7 +1654,7 @@ void add_rows(const FH3ModApi* api) {
     slider("EngineFeel", "Engine feel (%)", "The engine as a hum at its revs, knocking on the limiter, gear changes.", S.car, 1.0f);
     slider("Collisions", "Collisions (%)", "Crashes, by how hard they are.", S.collisions, 1.0f);
     slider("RoadSurface", "Road surface (%)", "Gravel, dirt, grass, sand, snow, cobbles, kerbs under each side of the car, and in the trigger you press.", S.surface, 1.0f);
-    slider("Events", "Jumps and landings (%)", "Take-offs and landings.", S.events, 1.0f);
+    slider("Events", "Events (%)", "Take-offs and landings, and the game's events: skills, checkpoints, countdowns, level-ups.", S.events, 1.0f);
     slider("MenuHaptics", "Menu haptics (%)", "Ticks and clicks as you move through the menus.", S.menus, 1.0f);
     if (api->api_version >= 9) choice("Triggers", "Adaptive triggers", "Resistance: the pedals. Full: also ABS, lock-ups, wheel spin, the rev limiter, gear changes, crashes and the road.", S.triggers, trig, 3);
     slider("TriggerStrength", "Trigger strength (%)", "How hard the trigger effects push.", S.trig_strength, 1.0f);
