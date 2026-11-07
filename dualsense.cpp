@@ -93,12 +93,11 @@ struct Settings {
     int throttle_resist = 1, throttle_start = 1, throttle_f = 1;
     int brake_hz = 34, throttle_hz = 55;
     float brake_from = 1.5f, spin_from = 0.8f;
-    int free_in_menus = 1, crash_jolt = 1, gear_kick = 1, rev_limiter = 1;
+    int free_in_menus = 1, crash_jolt = 1, gear_kick = 1;
     int light_mode = 4;         // 0 off, 1 colour, 2 impacts, 3 battery, 4 revs
     float brightness = 1.0f;
     int color[3] = {0, 90, 255}, flash[3] = {255, 255, 255};
     int rev_lights = 1, ps_battery = 1, low_battery_blink = 1;
-    int log = 0;
 } S;
 
 bool is_problem(const char* s) {
@@ -117,19 +116,11 @@ void say(const char* fmt, ...) {
     va_start(ap, fmt);
     std::vsnprintf(line, sizeof line, fmt, ap);
     va_end(ap);
-    if (g_api && g_mod && (S.log || is_problem(line) || std::strncmp(line, "controller", 10) == 0 || std::strncmp(line, "haptics", 7) == 0 ||
+    if (g_api && g_mod && (is_problem(line) || std::strncmp(line, "controller", 10) == 0 || std::strncmp(line, "haptics", 7) == 0 ||
                            std::strncmp(line, "car:", 4) == 0 || std::strncmp(line, "brakes", 6) == 0 || std::strncmp(line, "surface", 7) == 0))
         g_api->log(g_mod, line);
 }
-void vsay(const char* fmt, ...) {   // only with Log=1
-    if (!S.log) return;
-    char line[700];
-    va_list ap;
-    va_start(ap, fmt);
-    std::vsnprintf(line, sizeof line, fmt, ap);
-    va_end(ap);
-    if (g_api && g_mod) g_api->log(g_mod, line);
-}
+void vsay(const char*, ...) {}   // diagnostics are not part of the release
 
 float cfg_float(const wchar_t* key, float def) {
     wchar_t buf[64] = L"";
@@ -175,7 +166,6 @@ void load_config() {
     S.free_in_menus = cfg_int(L"FreeTriggersInMenus", 1);
     S.crash_jolt    = cfg_int(L"CrashJolt", 1);
     S.gear_kick     = cfg_int(L"GearKick", 1);
-    S.rev_limiter   = cfg_int(L"RevLimiter", 1);
     S.light_mode    = clampi(cfg_int(L"LightBar", 4), 0, 4);
     S.brightness    = clampf(cfg_float(L"Brightness", 1.0f), 0, 1);
     S.color[0] = clampi(cfg_int(L"ColorR", 0), 0, 255);
@@ -187,7 +177,6 @@ void load_config() {
     S.rev_lights        = cfg_int(L"RevLights", 1);
     S.ps_battery        = cfg_int(L"PSButtonBattery", 1);
     S.low_battery_blink = cfg_int(L"LowBatteryBlink", 1);
-    S.log               = cfg_int(L"Log", 0);
 }
 
 // ---- shared with the platform: "Local\FH3ModPlatform.Vibration" --------------------------------------------------------------------
@@ -196,7 +185,9 @@ struct Shared {
     DWORD tick;
     volatile DWORD driving_tick;   // written here: the car's feedback came in (the platform's mouse knows the menus by it)
     volatile DWORD gyro_on;        // the platform's gyro steering (the mic light)
-    DWORD reserved[9];
+    volatile DWORD xbox_tick;   // the platform: an XInput pad last used
+    volatile DWORD ds_tick;     // this mod: the DualSense last used
+    DWORD reserved[7];
 };
 Shared* shared() {
     static Shared* p = nullptr;
@@ -206,15 +197,25 @@ Shared* shared() {
     return p;
 }
 
+// Which device is in use: the one that gave the last real input (a DualSense press or an XInput pad's). A switch waits 0.6 s.
+bool ds_active() {
+    static bool ds = true;
+    static DWORD since = 0;
+    Shared* sh = shared();
+    if (!sh) return true;
+    const DWORD d = sh->ds_tick, x = sh->xbox_tick, now = GetTickCount();
+    const bool want = !x || (d && static_cast<LONG>(d - x) >= 0);   // no Xbox pad ever used, or the DualSense is the newer
+    if (want != ds && now - since > 600) { ds = want; since = now; }
+    return ds;
+}
+
 // ---- the car ------------------------------------------------------------------------------------------------------------------------
 enum { SURF_NONE = -1, SURF_TARMAC, SURF_KERB, SURF_GRAVEL, SURF_DIRT, SURF_GRASS, SURF_SAND, SURF_SNOW, SURF_COBBLE, SURF_METAL, SURF_BUMPY, SURF_KINDS };
 const char* const kSurfName[SURF_KINDS] = {"tarmac", "kerb", "gravel", "dirt", "grass", "sand", "snow", "cobbles", "metal", "bumpy"};
 
 struct CarState {
     volatile double at = 0;          // the car's feedback (the rumble function) last came in
-    volatile float rpm = 0;          // 0 idle .. 1 redline (the real revs over the highest this car showed)
-    volatile bool lim = false;       // on the rev limiter now
-    float peak = 0, prev_rpm = 0; double lim_until = 0, rpm_at = 0;
+    volatile float rpm = 0;          // 0 idle .. 1 redline
     volatile float spin = 0, brake = 0;   // the haptics' slips, smoothed
     volatile double shift_at = 0, hit_at = 0;
     volatile float hit = 0;
@@ -552,23 +553,7 @@ void detour_rumble(void* ctrl, float dt, const uint8_t* in, char flag) {
             const double now = now_s();
             const float* f   = reinterpret_cast<const float*>(in);
             const float rpm  = f[0];
-            // f[1] is the engine's real rpm; f[0] stops near 0.92 at the limiter, so the revs are measured against the highest this car showed
-            const float rr = f[1];
-            if (std::isfinite(rr) && rr > 0 && rr < 30000) {
-                const float thr = std::max(g_r2.load() / 255.0f, static_cast<float>(Car.throttle));
-                if (Car.speed < 0.5f && thr < 0.15f && rr < Car.peak * 0.4f) Car.peak = rr;   // stood still at idle: a new car, learn again
-                Car.peak = std::max(Car.peak, rr);
-                const double dtr = Car.rpm_at ? now - Car.rpm_at : 0.016;
-                if (dtr > 0.002) {
-                    const float slope = std::fabs(rr - Car.prev_rpm) / static_cast<float>(dtr);
-                    Car.prev_rpm = rr; Car.rpm_at = now;
-                    if (Car.peak > 2500 && rr >= Car.peak * 0.985f && slope < 350.0f && thr > 0.5f) Car.lim_until = now + 0.12;
-                }
-                Car.lim = now < Car.lim_until;
-                Car.rpm = Car.peak > 2500 ? clampf(rr / Car.peak, 0, 1.05f) : (std::isfinite(rpm) && rpm > -0.2f && rpm < 1.6f ? rpm : 0);
-            } else if (std::isfinite(rpm) && rpm > -0.2f && rpm < 1.6f) {
-                Car.rpm = rpm;
-            }
+            if (std::isfinite(rpm) && rpm > -0.2f && rpm < 1.6f) Car.rpm = rpm;
             float hit = std::max(std::max(hit_level(f[2], 10, 400), hit_level(f[3], 25, 375)), hit_level(f[4], 0.8f, 30));
             hit = std::pow(hit, 1.3f);
             if (hit > 0.05f && hit > car_hit(now) * 1.15f) {
@@ -582,19 +567,6 @@ void detour_rumble(void* ctrl, float dt, const uint8_t* in, char flag) {
             if (!Car.at) say("car: the game's feedback data comes in (revs %.2f)", static_cast<double>(rpm));
             Car.at = now;
             if (Shared* sh = shared()) sh->driving_tick = GetTickCount();
-            if (S.log) {
-                static double last = 0;
-                if (now - last > 0.7) {
-                    last = now;
-                    char b[600];
-                    int n = std::snprintf(b, sizeof b, "car feedback:");
-                    for (int i = 0; i < 15; ++i) n += std::snprintf(b + n, sizeof b - n, " %.3g", static_cast<double>(f[i]));
-                    n += std::snprintf(b + n, sizeof b - n, " | bytes %02X %02X %02X %02X | spin %.2f brake %.2f | gear %d speed %.1f surf %d/%d/%d/%d",
-                                       in[0x3C], in[0x3D], in[0x3E], in[0x3F], static_cast<double>(Car.spin), static_cast<double>(Car.brake), Car.gear,
-                                       static_cast<double>(Car.speed), Surf.cls[0], Surf.cls[1], Surf.cls[2], Surf.cls[3]);
-                    vsay("%s", b);
-                }
-            }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
@@ -1015,9 +987,6 @@ void triggers_make(BYTE e[2][11], double now, bool front) {
         const float k = slip_level(sa, S.spin_from, SPIN_FULL);
         trig_vib(e[1], 1 + static_cast<int>(k * 5 + 0.5f), static_cast<int>(S.throttle_hz * (1 + 0.4f * k) + 0.5f));
         set_r = true;
-    } else if (S.rev_limiter && Car.lim && r2 > 60 && (static_cast<int>(now * 18) & 1)) {
-        trig_vib(e[1], 4, 30);
-        set_r = true;
     }
     // the road: its texture in the trigger pressed (the brake's a little lighter)
     if (Surf.works && now - Surf.at < 0.3 && S.surface > 0) {
@@ -1124,7 +1093,7 @@ struct Synth {
         const double tau = 6.283185307179586;
         const double k = 1.0 - std::exp(-1.0 / (0.006 * sr));
         const double now = now_s(), t0 = now + ahead;
-        const bool front = game_in_front();
+        const bool front = game_in_front() && ds_active();
         float glo = 0, ghi = 0;
         if (front && S.enabled) game_motors(&glo, &ghi);
         const float st = S.strength;
@@ -1137,7 +1106,6 @@ struct Synth {
                 const float rpm = clampf(Car.rpm, 0, 1.05f), thr = std::max(g_r2.load() / 255.0f, static_cast<float>(Car.throttle));
                 eng_hz = 22 + 70 * rpm;
                 eng_t  = S.car * 0.45f * (0.1f + 0.9f * rpm * rpm) * (0.4f + 0.6f * thr);
-                if (S.rev_limiter && Car.lim) eng_t = (static_cast<int>(now * 16) & 1) ? S.car * 0.6f : S.car * 0.05f;
             }
             if (Surf.works && now - Surf.at < 0.3) {
                 road_cls[0] = surf_side(0);
@@ -1384,6 +1352,12 @@ void parse_input(const Ds& d, const BYTE* rep, DWORD len) {
     const double now = now_s();
     g_l2 = r[4];
     g_r2 = r[5];
+    {
+        auto off = [](int v) { return v < 128 ? 128 - v : v - 128; };
+        if (r[4] > 64 || r[5] > 64 || off(r[0]) > 43 || off(r[1]) > 43 || off(r[2]) > 43 || off(r[3]) > 43 || (r[7] & 0xF0) || (r[7] & 0x0F) < 8 ||
+            r[8] || (r[9] & 0x03))
+            if (Shared* sh = shared()) sh->ds_tick = GetTickCount();
+    }
     const BYTE b0 = r[7], b1 = r[8], b2 = r[9];
     WORD btn = 0;
     switch (b0 & 0x0F) {
@@ -1443,7 +1417,7 @@ void send_output(Ds& d, bool force) {
     BYTE c[47] = {};
     const double now  = now_s();
     const bool full   = force || OS.first || now - OS.full > 1.0;
-    const bool front  = game_in_front();
+    const bool front  = game_in_front() && ds_active();
     const bool driving = car_driving(now) && front;
     const float st    = S.strength;
 
@@ -1458,7 +1432,6 @@ void send_output(Ds& d, bool force) {
         if (driving && S.car > 0) {
             const float thr = std::max(g_r2.load() / 255.0f, static_cast<float>(Car.throttle));
             flo = S.car * 0.25f * (0.1f + 0.9f * Car.rpm * Car.rpm) * (0.4f + 0.6f * thr);
-            if (S.rev_limiter && Car.lim && (static_cast<int>(now * 16) & 1)) fhi = std::max(fhi, S.car * 0.4f);
         }
         if (driving) surface_rumble(now, &flo, &fhi);
         fx_rumble(now, &flo, &fhi);
@@ -1514,7 +1487,6 @@ void send_output(Ds& d, bool force) {
                 static const int red[3] = {255, 0, 0};
                 const float t = clampf((Car.rpm - 0.55f) / 0.4f, 0, 1);
                 for (int i = 0; i < 3; ++i) rgb[i] = mixb(S.color[i], red[i], t);
-                if (Car.lim && (static_cast<int>(now * 12) & 1)) rgb[0] = rgb[1] = rgb[2] = 0;
             }
             break;
         default: break;
@@ -1536,8 +1508,7 @@ void send_output(Ds& d, bool force) {
     BYTE player = 0x04;
     if (now < g_battery_show_until.load()) player = bars[clampi((battery + 19) / 20, 0, 5)];
     else if (S.rev_lights && driving) {
-        if (Car.lim) player = (static_cast<int>(now * 10) & 1) ? 0x1F : 0x00;
-        else player = Car.rpm < 0.70f ? 0x00 : bars[clampi(static_cast<int>((Car.rpm - 0.70f) / 0.055f) + 1, 1, 5)];
+        player = Car.rpm < 0.70f ? 0x00 : bars[clampi(static_cast<int>((Car.rpm - 0.70f) / 0.055f) + 1, 1, 5)];
     }
     if (full || player != OS.player) {
         c[1] |= 0x10;
