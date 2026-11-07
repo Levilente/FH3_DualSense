@@ -1,6 +1,6 @@
 # DualSense for Forza Horizon 3
 
-A mod for the FH3 Mod Platform (1.1.0 or newer): FH2-Input's feel on Forza Horizon 3, over **USB and Bluetooth** alike. Copy `DualSense.dll` into `fh3-mods`.
+A mod for the [FH3 Mod Platform](https://github.com/Levilente/FH3_ModPlatform) (**1.1.1 or newer**, 1.2.0 for hot reload): FH2-Input's feel on Forza Horizon 3, over **USB and Bluetooth** alike. Copy `DualSense.dll` into `fh3-mods`.
 
 **The controller** (the platform's part, settings in `fh3-mods\DualSense.ini` `[Controller]`): the DualSense is handed to the game as a gamepad, USB or Bluetooth, no drivers or Steam Input; Edge paddles and Fn buttons; touchpad click and swipes (D-pad); gyro steering (the mic button switches it, its light shows it); Circle/Cross swap.
 
@@ -10,7 +10,7 @@ A mod for the FH3 Mod Platform (1.1.0 or newer): FH2-Input's feel on Forza Horiz
 - **HD haptics**: the engine's hum at its revs, the road under each side of the car (gravel, dirt, grass, sand, snow, cobbles, kerbs, metal grates, bumpy tarmac), crashes by their strength, jumps and landings, gear changes, the game's own rumble, ticks and clicks in the menus. USB: the controller's audio endpoint. Bluetooth: haptics reports (0x32, 3 kHz), as found by [SAxense](https://apps.sdore.me/SAxense) (Sdore). `Vibration=1` uses the motors' emulation instead.
 - **Adaptive triggers**: L2 a brake pedal that starts with some resistance and hardens progressively, pulses only while the car's ABS is really working (the front slip swinging up and down) and goes hard where it is when a wheel locks; R2 vibrates with wheel spin; gear changes knock the trigger pressed, crashes and landings jolt both, the road's texture is felt in the trigger you press.
 - **Lights**: the light bar (revs, impacts, battery or a colour), player lights as a rev counter, the battery on the PS button, a low battery blinking red, the mic light for gyro steering.
-- MODS page rows for the main settings; all of them in `DualSense.ini` `[DualSense]`.
+- MODS page rows for the main settings; all of them in `DualSense.ini` `[DualSense]`. `Log=1` there writes the mod's ordinary lines (the controller found, the haptics started, the hooks) to `platform.log`; problems are always logged.
 
 Close Steam's PlayStation controller support and DS4Windows while playing. When the game ends or another window is in front, the controller goes back to itself. Nothing is written into the game's folder.
 
@@ -22,6 +22,10 @@ Close Steam's PlayStation controller support and DS4Windows while playing. When 
 
 Not (yet) on FH3: the settings inside Settings > Controls (they are on the MODS page).
 
-Build: `cmake -S mods/dualsense -B build -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake && cmake --build build`.
+Build (llvm-mingw): `cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=<FH3_ModPlatform>/cmake/mingw-w64-x86_64.cmake && cmake --build build` gives `build/DualSense.dll`. `include/` carries copies of the platform's headers; `-DFH3_PLATFORM_DIR=<a platform checkout>` builds against that checkout instead. The mod exports `fh3mod_shutdown`, so with the platform's hot reload on (`fh3-mods\platform.ini` `[dev] HotReload=1`) a rebuilt `DualSense.dll` is swapped in with F9 while the game runs (the controller goes back to itself first). Releasing: [RELEASING.md](RELEASING.md). Changes: [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE). An unofficial fan modification, not affiliated with Playground Games, Turn 10, Microsoft, Sony or the Azimuth developers. DualSense and PlayStation are trademarks of Sony Interactive Entertainment; Forza Horizon 3 is a trademark of Microsoft.
 
 Credits: the feature set and its feel follow [FH2-Input](https://github.com/alezwork/FH2-Input) by alezwork; report layouts from the Linux `hid-playstation` driver; trigger effects from Nielk1's notes; Bluetooth haptics from SAxense by Sdore.

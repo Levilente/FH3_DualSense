@@ -7,12 +7,12 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# The FH3 Mod Platform checkout (only include/fh3mod.h is needed to build a mod); this folder lives in it.
+# include/fh3mod.h and fh3game.h are copies of the FH3 Mod Platform's (1.2.0); -DFH3_PLATFORM_DIR=<a platform checkout> builds against that checkout instead.
 set(FH3_PLATFORM_DIR "${CMAKE_CURRENT_SOURCE_DIR}" CACHE PATH "folder with include/fh3mod.h (this repo carries a copy)")
 if(NOT EXISTS "${FH3_PLATFORM_DIR}/include/fh3mod.h")
     message(FATAL_ERROR "fh3mod.h not found in ${FH3_PLATFORM_DIR}/include")
 endif()
-set(FH3_PLATFORM_VERSION "1.1.0")
+set(FH3_PLATFORM_VERSION "1.1.1")   # the platform this mod needs (the controller timing it reads); a checkout given as FH3_PLATFORM_DIR overrides it
 if(EXISTS "${FH3_PLATFORM_DIR}/CMakeLists.txt")
     file(STRINGS "${FH3_PLATFORM_DIR}/CMakeLists.txt" _pv REGEX "^project\\(fh3_mod_platform VERSION")
     if(_pv)

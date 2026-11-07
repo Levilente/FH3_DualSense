@@ -65,6 +65,16 @@ constexpr size_t kSurfStride  = 0x3C0;
 
 const FH3ModApi* g_api = nullptr;
 FH3Mod* g_mod          = nullptr;
+
+// Hot reload (platform API 16): fh3mod_shutdown sets g_stop and g_stop_ev, the threads end, and the platform loads a rebuilt DLL.
+std::atomic<bool> g_stop{false};
+HANDLE g_stop_ev       = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+HANDLE g_threads[4]    = {};   // install_hooks, controller_thread, icons_thread, icons_scan_thread
+// Sleeps for `ms`, or less when the mod is shutting down; false then.
+bool nap(DWORD ms) {
+    if (g_stop.load()) return false;
+    return WaitForSingleObject(g_stop_ev, ms) == WAIT_TIMEOUT;
+}
 char* g_game           = nullptr;
 std::wstring g_cfg_path;
 
@@ -114,14 +124,16 @@ bool is_problem(const char* s) {
         if (std::strstr(low, w)) return true;
     return false;
 }
+bool g_log = false;   // DualSense.ini [DualSense] Log=1: the mod's ordinary lines (the controller found, the haptics started, the hooks); problems are always logged
 void say(const char* fmt, ...) {
     char line[700];
     va_list ap;
     va_start(ap, fmt);
     std::vsnprintf(line, sizeof line, fmt, ap);
     va_end(ap);
-    if (g_api && g_mod && (is_problem(line) || std::strncmp(line, "controller", 10) == 0 || std::strncmp(line, "haptics", 7) == 0 ||
-                           std::strncmp(line, "car:", 4) == 0 || std::strncmp(line, "brakes", 6) == 0 || std::strncmp(line, "surface", 7) == 0))
+    if (g_api && g_mod && (is_problem(line) || (g_log && (std::strncmp(line, "controller", 10) == 0 || std::strncmp(line, "haptics", 7) == 0 ||
+                                                           std::strncmp(line, "car:", 4) == 0 || std::strncmp(line, "brakes", 6) == 0 ||
+                                                           std::strncmp(line, "surface", 7) == 0 || std::strncmp(line, "icons", 5) == 0))))
         g_api->log(g_mod, line);
 }
 void vsay(const char*, ...) {}   // diagnostics are not part of the release
@@ -143,6 +155,7 @@ void save(const wchar_t* key, float v) {
 }
 
 void load_config() {
+    g_log           = cfg_int(L"Log", 0) != 0;
     S.enabled       = cfg_int(L"Enabled", 1);
     S.bluetooth     = cfg_int(L"Bluetooth", 1);
     S.vibration     = clampi(cfg_int(L"Vibration", 2), 0, 2);
@@ -1556,11 +1569,11 @@ DWORD WINAPI controller_thread(LPVOID) {
     double next_scan = 0;
     bool reading     = false;
     bool was_neutral = false;
-    for (;;) {
+    while (!g_stop.load()) {
         Ds& d = g_ds;
         if (!d.h) {
             reading = false;
-            if (now_s() < next_scan || !S.enabled) { Sleep(250); continue; }
+            if (now_s() < next_scan || !S.enabled) { nap(250); continue; }
             next_scan = now_s() + 2.0;
             if (!ds_open(d)) continue;
             OS = OutState{};
@@ -1604,6 +1617,11 @@ DWORD WINAPI controller_thread(LPVOID) {
         was_neutral = false;
         if (now - OS.write >= tick * 0.8 || OS.first) send_output(d, false);
     }
+    // shut down: the controller back to itself, the haptics ended, the device let go
+    if (g_ds.h) send_reset(g_ds);
+    haptics_stop();
+    ds_close(g_ds);
+    return 0;
 }
 
 // ---- the Mods page ---------------------------------------------------------------------------------------------------------------------
@@ -2223,13 +2241,13 @@ void mem_apply() {
 
 DWORD WINAPI icons_scan_thread(LPVOID) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
-    Sleep(25000);
+    if (!nap(25000)) return 0;
     for (;;) {
         mem_scan(false);
         mem_apply();
         for (int k = 0; k < 10; k++) {
             for (int i = 0; i < 300; i++) {   // 30 s, but a full search at once when a look changed and none was found yet
-                Sleep(100);
+                if (!nap(100)) return 0;
                 if (g_ifound.empty() && i == 100) break;
             }
             mem_scan(true);
@@ -2243,7 +2261,8 @@ DWORD WINAPI icons_scan_thread(LPVOID) {
 DWORD WINAPI icons_thread(LPVOID) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     icons_load();
-    for (int i = 0; i < 80 && !g_ds.h; i++) Sleep(100);   // the controller thread opens the DualSense in the first seconds
+    for (int i = 0; i < 80 && !g_ds.h; i++)
+        if (!nap(100)) return 0;   // the controller thread opens the DualSense in the first seconds
     if (g_ds.h && ds_active() && g_api->api_version >= 2 && g_api->set_file) {
         int ok = 0;
         static const char base[] = "ui/textures/data_bound/ControllerIcons/";
@@ -2256,15 +2275,15 @@ DWORD WINAPI icons_thread(LPVOID) {
         g_look = 1;
         say("icons: the PlayStation look handed to the game (%d files)", ok);
     }
-    if (HANDLE t = CreateThread(nullptr, 0, icons_scan_thread, nullptr, 0, nullptr)) CloseHandle(t);
-    for (;;) {
-        Sleep(100);
+    g_threads[3] = CreateThread(nullptr, 0, icons_scan_thread, nullptr, 0, nullptr);
+    while (nap(100)) {
         const int want = g_ds.h && ds_active() ? 1 : 0;
         if (want != g_look.load()) {
             g_look = want;
             mem_apply();
         }
     }
+    return 0;
 }
 
 FH3MOD_EXPORT int fh3mod_init(const FH3ModApi* api) {
@@ -2274,9 +2293,9 @@ FH3MOD_EXPORT int fh3mod_init(const FH3ModApi* api) {
     info.size             = sizeof info;
     info.name             = "DualSense";
     info.version          = DUALSENSE_VERSION;
-    info.github_repo      = nullptr;
+    info.github_repo      = "Levilente/FH3_DualSense";   // private for now: the update check finds nothing until it is public
     info.platform_version = FH3MOD_PLATFORM_VERSION;
-    info.check_updates    = 0;
+    info.check_updates    = 1;
     info.description      = "DualSense (USB and Bluetooth): HD haptics of the engine, the road, crashes and the menus; adaptive triggers with ABS, lock-ups and wheel spin; rev-counter lights.";
     info.offline_only     = 1;
     g_mod                 = api->register_mod(&info);
@@ -2285,8 +2304,29 @@ FH3MOD_EXPORT int fh3mod_init(const FH3ModApi* api) {
     load_config();
     crc_init();
     add_rows(api);
-    if (HANDLE t = CreateThread(nullptr, 0, install_hooks, nullptr, 0, nullptr)) CloseHandle(t);
-    if (HANDLE t = CreateThread(nullptr, 0, controller_thread, nullptr, 0, nullptr)) CloseHandle(t);
-    if (HANDLE t = CreateThread(nullptr, 0, icons_thread, nullptr, 0, nullptr)) CloseHandle(t);
+    g_threads[0] = CreateThread(nullptr, 0, install_hooks, nullptr, 0, nullptr);
+    g_threads[1] = CreateThread(nullptr, 0, controller_thread, nullptr, 0, nullptr);
+    g_threads[2] = CreateThread(nullptr, 0, icons_thread, nullptr, 0, nullptr);
     return 0;
+}
+
+// Hot reload (platform API 16, docs/writing-a-mod.md there): called before a rebuilt DualSense.dll replaces this one. Ends the threads,
+// gives the controller back to itself (lights, triggers, rumble), ends the haptics stream, puts the game's Xbox button icons back in
+// memory, and lets go of the exception handler; the platform then switches the hooks off.
+FH3MOD_EXPORT void fh3mod_shutdown(void) {
+    g_stop.store(true);
+    SetEvent(g_stop_ev);
+    for (HANDLE& h : g_threads)
+        if (h) {
+            WaitForSingleObject(h, 4000);
+            CloseHandle(h);
+            h = nullptr;
+        }
+    for (int i = 0; i < 40 && g_hap_running.load(); ++i) Sleep(50);   // the haptics threads end by themselves (haptics_stop)
+    g_look = 0;
+    mem_apply();   // the Xbox look in the game's memory: the new build finds the icons where they were
+    if (g_iveh) {
+        RemoveVectoredExceptionHandler(g_iveh);
+        g_iveh = nullptr;
+    }
 }

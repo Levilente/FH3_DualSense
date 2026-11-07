@@ -2,6 +2,9 @@
 
 ## 1.4.0
 
+- **Log off by default**: `DualSense.ini` `[DualSense]` `Log=1` writes the mod's ordinary lines to `platform.log`; problems are always logged.
+- Hot reload (FH3 Mod Platform 1.2.0, a developer feature, off by default): the mod exports `fh3mod_shutdown`, so a rebuilt `DualSense.dll` can be swapped in with F9 while the game runs; the controller goes back to itself, the haptics end and the Xbox icons are put back first.
+- Needs FH3 Mod Platform 1.1.1 or newer.
 - The game's interface sounds drive haptics: menu moves, choices, page swells, tab switches, and events (skills, checkpoints, countdowns, speed traps, results, level-ups, tombola, notifications).
 
 ## 1.3.0
