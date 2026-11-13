@@ -204,8 +204,7 @@ struct Shared {
     volatile DWORD gyro_on;        // the platform's gyro steering (the mic light)
     volatile DWORD xbox_tick;   // the platform: an XInput pad last used
     volatile DWORD ds_tick;     // this mod: the DualSense last used
-    volatile DWORD kb_tick;     // the platform: the keyboard or the mouse last used
-    DWORD reserved[6];
+    DWORD reserved[7];
 };
 Shared* shared() {
     static Shared* p = nullptr;
@@ -213,6 +212,24 @@ Shared* shared() {
         if (HANDLE m = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, L"Local\\FH3ModPlatform.Vibration"))
             p = static_cast<Shared*>(MapViewOfFile(m, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(Shared)));
     return p;
+}
+
+// The keyboard and the mouse: the game in front and any key, mouse button or mouse movement (polled by the icons thread)
+volatile DWORD g_kb_tick = 0;
+void kb_watch() {
+    static POINT last{};
+    static bool have = false;
+    static BYTE keys[] = {VK_SPACE, VK_RETURN, VK_ESCAPE, VK_TAB, VK_BACK, VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_LSHIFT, VK_LCONTROL, VK_LBUTTON, VK_RBUTTON, VK_MBUTTON};
+    bool act = false;
+    for (BYTE k : keys) act = act || (GetAsyncKeyState(k) & 0x8000);
+    for (int k = 'A'; k <= 'Z' && !act; ++k) act = (GetAsyncKeyState(k) & 0x8000) != 0;
+    POINT p;
+    if (GetCursorPos(&p)) {
+        if (have && (std::abs(p.x - last.x) > 6 || std::abs(p.y - last.y) > 6)) act = true;
+        last = p;
+        have = true;
+    }
+    if (act) g_kb_tick = GetTickCount() | 1;
 }
 
 // Which device is in use: the one that gave the last real input (a DualSense press, an XInput pad's, the keyboard or mouse).
@@ -223,7 +240,7 @@ int latest_device() {
     Shared* sh = shared();
     if (!sh) return -1;
     const DWORD now = GetTickCount();
-    const DWORD t[3] = {sh->xbox_tick, sh->ds_tick, sh->kb_tick};
+    const DWORD t[3] = {sh->xbox_tick, sh->ds_tick, g_kb_tick};
     int want = -1;
     DWORD best_age = 0xFFFFFFFFu;
     for (int k = 0; k < 3; ++k)
@@ -2281,7 +2298,7 @@ DWORD WINAPI icons_thread(LPVOID) {
         const int d = latest_device();
         return d >= 0 ? d : (g_ds.h ? 1 : 0);
     };
-    const int start = wanted();
+    const int start = wanted();   // (the keyboard is watched by the loop below)
     if (start != 0 && g_api->api_version >= 2 && g_api->set_file) {
         int ok = 0;
         static const char base[] = "ui/textures/data_bound/ControllerIcons/";
@@ -2297,6 +2314,7 @@ DWORD WINAPI icons_thread(LPVOID) {
     }
     g_threads[3] = CreateThread(nullptr, 0, icons_scan_thread, nullptr, 0, nullptr);
     while (nap(100)) {
+        if (game_in_front()) kb_watch();
         const int want = wanted();
         if (want != g_look.load()) {
             g_look = want;
