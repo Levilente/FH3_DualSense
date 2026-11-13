@@ -236,16 +236,22 @@ void kb_watch() {
 // 1 DualSense, 0 an Xbox pad, 2 keyboard and mouse, -1 nothing used yet. A switch waits 0.6 s.
 int latest_device() {
     static int cur = -1;
-    static DWORD since = 0;
     Shared* sh = shared();
     if (!sh) return -1;
     const DWORD now = GetTickCount();
     const DWORD t[3] = {sh->xbox_tick, sh->ds_tick, g_kb_tick};
+    // the device in use stays while it is still being used (1.5 s); only then the freshest other one takes over: two devices
+    // moving at once (a mouse nudged while a pad is held) don't make the icons flicker
+    if (cur >= 0 && t[cur] && now - t[cur] < 1500) return cur;
     int want = -1;
     DWORD best_age = 0xFFFFFFFFu;
     for (int k = 0; k < 3; ++k)
         if (t[k] && now - t[k] < best_age) { best_age = now - t[k]; want = k; }
-    if (want != cur && now - since > 600) { cur = want; since = now; }
+    if (want >= 0 && want != cur) {
+        cur = want;
+        say("icons: device in use: %s (last input ages: Xbox pad %s, DualSense %s, keyboard/mouse %s ms)", want == 1 ? "DualSense" : want == 2 ? "keyboard and mouse" : "Xbox pad",
+            t[0] ? std::to_string(now - t[0]).c_str() : "-", t[1] ? std::to_string(now - t[1]).c_str() : "-", t[2] ? std::to_string(now - t[2]).c_str() : "-");
+    }
     return cur;
 }
 bool ds_active() {   // the DualSense's haptics, triggers and lights: when it is in use, or nothing has been used yet
@@ -2241,33 +2247,39 @@ bool write_watched(BYTE* p) {
     ULONG gran;
     return GetWriteWatch(0, reinterpret_cast<void*>(reinterpret_cast<ULONG_PTR>(p) & ~static_cast<ULONG_PTR>(0xFFF)), 4096, pages, &count, &gran) == 0;
 }
-bool mem_put(BYTE* at, const BYTE* src, DWORD len) {
+int mem_put(BYTE* at, const BYTE* src, DWORD len) {   // 0 not written, 1 plain memory, 2 the engine's (sealed or write-watched)
     MEMORY_BASIC_INFORMATION m;
-    if (!VirtualQuery(at, &m, sizeof m) || m.State != MEM_COMMIT) return false;
+    if (!VirtualQuery(at, &m, sizeof m) || m.State != MEM_COMMIT) return 0;
     const DWORD prot = m.Protect & 0xFF;
     const bool sealed = prot == PAGE_READONLY;
-    if (sealed && !write_watched(at)) return false;
-    if (!sealed && prot != PAGE_READWRITE && prot != PAGE_EXECUTE_READWRITE) return false;
+    const bool watched = write_watched(at);
+    if (sealed && !watched) return 0;
+    if (!sealed && prot != PAGE_READWRITE && prot != PAGE_EXECUTE_READWRITE) return 0;
     if (!g_iveh) g_iveh = AddVectoredExceptionHandler(0, icons_veh);
     g_iwlo    = at;
     g_iwhi    = at + len;
     g_iwriter = GetCurrentThreadId();
     std::memcpy(at, src, len);
     g_iwriter = 0;
-    return true;
+    return sealed || watched ? 2 : 1;
 }
 void mem_apply() {
     static BYTE* tmp = static_cast<BYTE*>(HeapAlloc(GetProcessHeap(), 0, 1 << 15));
     if (!tmp || g_itex.empty()) return;
     const int want = g_look.load();
-    int changed = 0;
+    int plain = 0, engine = 0;
     AcquireSRWLockExclusive(&g_imem);
     for (auto& f : g_ifound) {
         const int h = holds(f.at, f.tex, tmp);
-        if (h >= 0 && h != want && mem_put(f.at, g_itex[f.tex].d[want], g_itex[f.tex].len)) ++changed;
+        if (h >= 0 && h != want) {
+            const int w = mem_put(f.at, g_itex[f.tex].d[want], g_itex[f.tex].len);
+            plain += w == 1;
+            engine += w == 2;
+        }
     }
     ReleaseSRWLockExclusive(&g_imem);
-    if (changed) say("icons: %s look (%d icons in the game's memory changed)", want == 1 ? "PlayStation" : want == 2 ? "keyboard" : "Xbox", changed);
+    if (plain || engine)
+        say("icons: %s look: %d icons written in the engine's texture memory, %d in plain copies", want == 1 ? "PlayStation" : want == 2 ? "keyboard" : "Xbox", engine, plain);
 }
 
 DWORD WINAPI icons_scan_thread(LPVOID) {
