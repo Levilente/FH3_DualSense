@@ -16,6 +16,8 @@ Close Steam's PlayStation controller support and DS4Windows while playing. When 
 
 **PlayStation button icons** in the game's prompts (✕ ○ □ △, L1 R1 L2 R2) while the DualSense is in use; the game's own Xbox icons when an Xbox pad is. The look follows the device in use at once: the new icons are written over the ones in the game's memory (found by their bytes, a search that runs on a low-priority thread from 25 s after the start, as in alezwork's FH2-Input). `scripts/gen_icons.py` draws them from the game's own icons.
 
+**Keyboard icons** (Space, E, Q, R, Shift, C, S, W, Esc, Tab, the arrow keys) show in the game's prompts while the keyboard or mouse is in use (the default key bindings of the keyboard gamepad; other bindings keep the same icons).
+
 **The device in use decides**: the one that gave the last real input (a DualSense press, an Xbox pad's button, trigger past a quarter or stick past a third) gets the haptics, triggers and lights; switch to an Xbox pad and the DualSense goes quiet, press the DualSense and it takes over again (a switch waits 0.6 s). It starts with whichever you touch first.
 
 **The game's own interface sounds are felt** (hooked in the audio engine, as in FH2-Input): a tick for every move in the menus, a click for every choice, swells as pages open, tab switches on the bumper's side, and the events: skills and their chain, checkpoints, countdowns, speed traps, race results, level-ups, the tombola, notifications. *Menu haptics* and *Events* sliders on the MODS page set their strength.

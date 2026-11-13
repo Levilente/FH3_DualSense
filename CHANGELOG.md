@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.0
+
+- Keyboard icons (Space, E, Q, R, Shift, C, S, W, Esc, Tab, arrows) in the game's prompts while the keyboard or mouse is the device in use; the look follows PlayStation / Xbox / keyboard live. The keys shown are the default key bindings of the keyboard gamepad. Needs platform 1.1.2.
+
 ## 1.4.0
 
 - **Log off by default**: `DualSense.ini` `[DualSense]` `Log=1` writes the mod's ordinary lines to `platform.log`; problems are always logged.

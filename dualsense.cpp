@@ -204,7 +204,8 @@ struct Shared {
     volatile DWORD gyro_on;        // the platform's gyro steering (the mic light)
     volatile DWORD xbox_tick;   // the platform: an XInput pad last used
     volatile DWORD ds_tick;     // this mod: the DualSense last used
-    DWORD reserved[7];
+    volatile DWORD kb_tick;     // the platform: the keyboard or the mouse last used
+    DWORD reserved[6];
 };
 Shared* shared() {
     static Shared* p = nullptr;
@@ -214,16 +215,25 @@ Shared* shared() {
     return p;
 }
 
-// Which device is in use: the one that gave the last real input (a DualSense press or an XInput pad's). A switch waits 0.6 s.
-bool ds_active() {
-    static bool ds = true;
+// Which device is in use: the one that gave the last real input (a DualSense press, an XInput pad's, the keyboard or mouse).
+// 1 DualSense, 0 an Xbox pad, 2 keyboard and mouse, -1 nothing used yet. A switch waits 0.6 s.
+int latest_device() {
+    static int cur = -1;
     static DWORD since = 0;
     Shared* sh = shared();
-    if (!sh) return true;
-    const DWORD d = sh->ds_tick, x = sh->xbox_tick, now = GetTickCount();
-    const bool want = !x || (d && static_cast<LONG>(d - x) >= 0);   // no Xbox pad ever used, or the DualSense is the newer
-    if (want != ds && now - since > 600) { ds = want; since = now; }
-    return ds;
+    if (!sh) return -1;
+    const DWORD now = GetTickCount();
+    const DWORD t[3] = {sh->xbox_tick, sh->ds_tick, sh->kb_tick};
+    int want = -1;
+    DWORD best_age = 0xFFFFFFFFu;
+    for (int k = 0; k < 3; ++k)
+        if (t[k] && now - t[k] < best_age) { best_age = now - t[k]; want = k; }
+    if (want != cur && now - since > 600) { cur = want; since = now; }
+    return cur;
+}
+bool ds_active() {   // the DualSense's haptics, triggers and lights: when it is in use, or nothing has been used yet
+    const int d = latest_device();
+    return d == 1 || d == -1;
 }
 
 // ---- the car ------------------------------------------------------------------------------------------------------------------------
@@ -2029,9 +2039,9 @@ std::atomic<bool> g_ui_hooked{false};
 #include "icons_data.h"
 struct IconTex {
     const BYTE* hdr = nullptr;      // 87-byte .swatchbin header
-    const BYTE* d[2] = {};          // pixels: 0 the game's (Xbox), 1 PlayStation
-    DWORD len = 0, anchor[2] = {};
-    ULONGLONG key[2] = {};
+    const BYTE* d[3] = {};          // pixels: 0 the game's (Xbox), 1 PlayStation, 2 keyboard
+    DWORD len = 0, anchor[3] = {};
+    ULONGLONG key[3] = {};
     std::vector<std::string> paths; // inside ControllerIcons.zip
 };
 std::vector<IconTex> g_itex;
@@ -2094,7 +2104,9 @@ void icons_load() {
         p += len;
         t.d[1] = p;
         p += len;
-        for (int v = 0; v < 2; v++) {
+        t.d[2] = p;
+        p += len;
+        for (int v = 0; v < 3; v++) {
             t.anchor[v] = pick_anchor(t.d[v], len);
             std::memcpy(&t.key[v], t.d[v] + t.anchor[v], 8);
         }
@@ -2104,7 +2116,7 @@ void icons_load() {
     for (auto& k : g_ikeys) k.tex = -1;
     g_ibloom = static_cast<BYTE*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 1 << 17));
     for (int i = 0; g_ibloom && i < static_cast<int>(g_itex.size()); i++)
-        for (int v = 0; v < 2; v++) {
+        for (int v = 0; v < 3; v++) {
             const DWORD h = ikey_hash(g_itex[i].key[v]);
             g_ibloom[h >> 3] |= static_cast<BYTE>(1 << (h & 7));
             for (DWORD k = h & 511;; k = (k + 1) & 511)
@@ -2120,8 +2132,10 @@ int holds(BYTE* p, int t, BYTE* tmp) {
     SIZE_T got = 0;
     if (!ReadProcessMemory(GetCurrentProcess(), p, tmp, g_itex[t].len, &got) || got != g_itex[t].len) return -1;
     const int cur = g_look.load();
-    if (!std::memcmp(tmp, g_itex[t].d[cur], g_itex[t].len)) return cur;
-    if (!std::memcmp(tmp, g_itex[t].d[1 - cur], g_itex[t].len)) return 1 - cur;
+    for (int k = 0; k < 3; ++k) {
+        const int v = (cur + k) % 3;
+        if (!std::memcmp(tmp, g_itex[t].d[v], g_itex[t].len)) return v;
+    }
     return -1;
 }
 
@@ -2236,7 +2250,7 @@ void mem_apply() {
         if (h >= 0 && h != want && mem_put(f.at, g_itex[f.tex].d[want], g_itex[f.tex].len)) ++changed;
     }
     ReleaseSRWLockExclusive(&g_imem);
-    if (changed) say("icons: %s look (%d icons in the game's memory changed)", want ? "PlayStation" : "Xbox", changed);
+    if (changed) say("icons: %s look (%d icons in the game's memory changed)", want == 1 ? "PlayStation" : want == 2 ? "keyboard" : "Xbox", changed);
 }
 
 DWORD WINAPI icons_scan_thread(LPVOID) {
@@ -2263,21 +2277,27 @@ DWORD WINAPI icons_thread(LPVOID) {
     icons_load();
     for (int i = 0; i < 80 && !g_ds.h; i++)
         if (!nap(100)) return 0;   // the controller thread opens the DualSense in the first seconds
-    if (g_ds.h && ds_active() && g_api->api_version >= 2 && g_api->set_file) {
+    auto wanted = [] {
+        const int d = latest_device();
+        return d >= 0 ? d : (g_ds.h ? 1 : 0);
+    };
+    const int start = wanted();
+    if (start != 0 && g_api->api_version >= 2 && g_api->set_file) {
         int ok = 0;
         static const char base[] = "ui/textures/data_bound/ControllerIcons/";
         for (auto& t : g_itex) {
+            if (!std::memcmp(t.d[start], t.d[0], t.len)) continue;   // the game's own icon is the same
             std::vector<BYTE> file(t.hdr, t.hdr + 87);
-            file.insert(file.end(), t.d[1], t.d[1] + t.len);
+            file.insert(file.end(), t.d[start], t.d[start] + t.len);
             for (auto& p : t.paths)
                 if (g_api->set_file(g_mod, (base + p).c_str(), file.data(), file.size())) ++ok;
         }
-        g_look = 1;
-        say("icons: the PlayStation look handed to the game (%d files)", ok);
+        g_look = start;
+        say("icons: the %s look handed to the game (%d files)", start == 1 ? "PlayStation" : "keyboard", ok);
     }
     g_threads[3] = CreateThread(nullptr, 0, icons_scan_thread, nullptr, 0, nullptr);
     while (nap(100)) {
-        const int want = g_ds.h && ds_active() ? 1 : 0;
+        const int want = wanted();
         if (want != g_look.load()) {
             g_look = want;
             mem_apply();
