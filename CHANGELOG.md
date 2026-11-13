@@ -2,7 +2,7 @@
 
 ## 1.5.0
 
-- Keyboard icons (Space, E, Q, R, Shift, C, S, W, Esc, Tab, arrows) in the game's prompts while the keyboard or mouse is the device in use; the look follows PlayStation / Xbox / keyboard live. The keys shown are the default key bindings of the keyboard gamepad. Needs platform 1.1.2.
+- Keyboard icons (Space, E, Q, R, Shift, C, S, W, Esc, Tab, arrows) in the game's prompts while the keyboard or mouse is the device in use; the look follows PlayStation / Xbox / keyboard live. The keys shown are the default key bindings of the keyboard gamepad. Needs platform 1.3.1.
 
 ## 1.4.0
 
