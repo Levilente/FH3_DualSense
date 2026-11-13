@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.1
+
+- The Xbox pads are read by the mod itself (XInputGetStateEx), with a stricter threshold, so noise on a virtual pad no longer fights the keyboard; the device in use stays while it is used.
+- `XInputPadIcons=1`: PlayStation icons for an XInput pad that is a DualSense (DSX, DS4Windows, Steam Input).
+
 ## 1.5.0
 
 - Keyboard icons (Space, E, Q, R, Shift, C, S, W, Esc, Tab, arrows) in the game's prompts while the keyboard or mouse is the device in use; the look follows PlayStation / Xbox / keyboard live. The keys shown are the default key bindings of the keyboard gamepad. No platform change needed (the keyboard is watched by the mod itself).

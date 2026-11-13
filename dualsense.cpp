@@ -108,6 +108,7 @@ struct Settings {
     int brake_hz = 34, throttle_hz = 55;
     float brake_from = 1.5f, spin_from = 0.8f;
     int free_in_menus = 1, crash_jolt = 1, gear_kick = 1;
+    int xpad_ps = 0;   // an XInput pad is a DualSense behind DSX / DS4Windows / Steam Input: PlayStation icons for it
     int light_mode = 4;         // 0 off, 1 colour, 2 impacts, 3 battery, 4 revs
     float brightness = 1.0f;
     int color[3] = {0, 90, 255}, flash[3] = {255, 255, 255};
@@ -156,6 +157,7 @@ void save(const wchar_t* key, float v) {
 
 void load_config() {
     g_log           = cfg_int(L"Log", 0) != 0;
+    S.xpad_ps       = cfg_int(L"XInputPadIcons", 0);
     S.enabled       = cfg_int(L"Enabled", 1);
     S.bluetooth     = cfg_int(L"Bluetooth", 1);
     S.vibration     = clampi(cfg_int(L"Vibration", 2), 0, 2);
@@ -216,6 +218,34 @@ Shared* shared() {
 
 // The keyboard and the mouse: the game in front and any key, mouse button or mouse movement (polled by the icons thread)
 volatile DWORD g_kb_tick = 0;
+volatile DWORD g_xbox_tick = 0;
+// The Xbox pads, read with XInputGetStateEx (export 100: the platform doesn't hook it, so this is the pad itself, not what mods are
+// given). A deliberate input only: a button, a trigger past a quarter, a stick past 60%; a drifting or noisy stick is not one.
+void xbox_watch() {
+    using GetStateEx = DWORD(WINAPI*)(DWORD, void*);
+    static GetStateEx fn = nullptr;
+    static bool tried    = false;
+    static DWORD packet[4] = {}, rescan = 0;
+    static bool there[4] = {};
+    if (!tried) {
+        tried = true;
+        if (HMODULE x = LoadLibraryExW(L"xinput1_4.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))
+            fn = reinterpret_cast<GetStateEx>(reinterpret_cast<void*>(GetProcAddress(x, reinterpret_cast<LPCSTR>(100))));
+    }
+    if (!fn) return;
+    const DWORD now = GetTickCount();
+    const bool scan = now - rescan > 2000;
+    if (scan) rescan = now;
+    for (DWORD i = 0; i < 4; ++i) {
+        if (!there[i] && !scan) continue;
+        struct { DWORD packet; WORD buttons; BYTE lt, rt; SHORT lx, ly, rx, ry; } st{};
+        there[i] = fn(i, &st) == ERROR_SUCCESS;
+        if (!there[i] || st.packet == packet[i]) continue;
+        packet[i] = st.packet;
+        if ((st.buttons & 0xF3FF) || st.lt > 64 || st.rt > 64 || std::abs(st.lx) > 20000 || std::abs(st.ly) > 20000 || std::abs(st.rx) > 20000 || std::abs(st.ry) > 20000)
+            g_xbox_tick = now | 1;
+    }
+}
 void kb_watch() {
     static POINT last{};
     static bool have = false;
@@ -239,7 +269,7 @@ int latest_device() {
     Shared* sh = shared();
     if (!sh) return -1;
     const DWORD now = GetTickCount();
-    const DWORD t[3] = {sh->xbox_tick, sh->ds_tick, g_kb_tick};
+    const DWORD t[3] = {g_xbox_tick, sh->ds_tick, g_kb_tick};
     // the device in use stays while it is still being used (1.5 s); only then the freshest other one takes over: two devices
     // moving at once (a mouse nudged while a pad is held) don't make the icons flicker
     if (cur >= 0 && t[cur] && now - t[cur] < 1500) return cur;
@@ -2308,6 +2338,7 @@ DWORD WINAPI icons_thread(LPVOID) {
         if (!nap(100)) return 0;   // the controller thread opens the DualSense in the first seconds
     auto wanted = [] {
         const int d = latest_device();
+        if (d == 0 && S.xpad_ps) return 1;   // an Xbox pad that is a DualSense (DSX, DS4Windows, Steam Input): the PlayStation look
         return d >= 0 ? d : (g_ds.h ? 1 : 0);
     };
     const int start = wanted();   // (the keyboard is watched by the loop below)
@@ -2326,7 +2357,7 @@ DWORD WINAPI icons_thread(LPVOID) {
     }
     g_threads[3] = CreateThread(nullptr, 0, icons_scan_thread, nullptr, 0, nullptr);
     while (nap(100)) {
-        if (game_in_front()) kb_watch();
+        if (game_in_front()) { kb_watch(); xbox_watch(); }
         const int want = wanted();
         if (want != g_look.load()) {
             g_look = want;
