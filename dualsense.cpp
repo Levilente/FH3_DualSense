@@ -266,21 +266,24 @@ void kb_watch() {
 // 1 DualSense, 0 an Xbox pad, 2 keyboard and mouse, -1 nothing used yet. A switch waits 0.6 s.
 int latest_device() {
     static int cur = -1;
+    static DWORD switched = 0;
     Shared* sh = shared();
     if (!sh) return -1;
     const DWORD now = GetTickCount();
     const DWORD t[3] = {g_xbox_tick, sh->ds_tick, g_kb_tick};
-    // the device in use stays while it is still being used (1.5 s); only then the freshest other one takes over: two devices
-    // moving at once (a mouse nudged while a pad is held) don't make the icons flicker
-    if (cur >= 0 && t[cur] && now - t[cur] < 1500) return cur;
+    // age of a device's last input (a tick written a moment after `now` was read counts as 0)
+    auto age = [&](DWORD v) -> DWORD { return !v ? 0xFFFFFFFFu : (static_cast<LONG>(now - v) < 0 ? 0u : now - v); };
+    // the device in use stays while it is still being used (1.5 s) and for at least 1 s after a switch; only then the freshest other
+    // one takes over: two devices moving at once (a mouse nudged while a pad is held) don't make the icons flicker
+    if (cur >= 0 && (age(t[cur]) < 1500 || now - switched < 1000)) return cur;
     int want = -1;
     DWORD best_age = 0xFFFFFFFFu;
     for (int k = 0; k < 3; ++k)
-        if (t[k] && now - t[k] < best_age) { best_age = now - t[k]; want = k; }
+        if (age(t[k]) < best_age) { best_age = age(t[k]); want = k; }
     if (want >= 0 && want != cur) {
-        cur = want;
-        say("icons: device in use: %s (last input ages: Xbox pad %s, DualSense %s, keyboard/mouse %s ms)", want == 1 ? "DualSense" : want == 2 ? "keyboard and mouse" : "Xbox pad",
-            t[0] ? std::to_string(now - t[0]).c_str() : "-", t[1] ? std::to_string(now - t[1]).c_str() : "-", t[2] ? std::to_string(now - t[2]).c_str() : "-");
+        cur      = want;
+        switched = now;
+        say("icons: device in use: %s", want == 1 ? "DualSense" : want == 2 ? "keyboard and mouse" : "Xbox pad");
     }
     return cur;
 }
@@ -1435,7 +1438,7 @@ void parse_input(const Ds& d, const BYTE* rep, DWORD len) {
     g_r2 = r[5];
     {
         auto off = [](int v) { return v < 128 ? 128 - v : v - 128; };
-        if (r[4] > 64 || r[5] > 64 || off(r[0]) > 43 || off(r[1]) > 43 || off(r[2]) > 43 || off(r[3]) > 43 || (r[7] & 0xF0) || (r[7] & 0x0F) < 8 ||
+        if (r[4] > 64 || r[5] > 64 || off(r[0]) > 77 || off(r[1]) > 77 || off(r[2]) > 77 || off(r[3]) > 77 || (r[7] & 0xF0) || (r[7] & 0x0F) < 8 ||
             r[8] || (r[9] & 0x03))
             if (Shared* sh = shared()) sh->ds_tick = GetTickCount();
     }
