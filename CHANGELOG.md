@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.2
+
+- The icons no longer flap between two devices that report input within the same tick, a switch of the look holds for at least 1 s, and DualSense sticks count as use from 60 % (they were counted too early).
+- Needs FH3 Mod Platform 1.1.1 or newer (unchanged).
+
 ## 1.5.1
 
 - The Xbox pads are read by the mod itself (XInputGetStateEx), with a stricter threshold, so noise on a virtual pad no longer fights the keyboard; the device in use stays while it is used.
