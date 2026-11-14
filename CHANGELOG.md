@@ -4,6 +4,7 @@
 
 - The Xbox pads are read by the mod itself (XInputGetStateEx), with a stricter threshold, so noise on a virtual pad no longer fights the keyboard; the device in use stays while it is used.
 - `XInputPadIcons=1`: PlayStation icons for an XInput pad that is a DualSense (DSX, DS4Windows, Steam Input).
+- Needs FH3 Mod Platform 1.1.1 or newer (unchanged).
 
 ## 1.5.0
 
